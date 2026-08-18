@@ -394,7 +394,7 @@ pub(crate) fn delete_meta(conn: &Connection, key: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::db::test::new_mem_db;
-    use crate::encryption::EncryptorDecryptor;
+    use crate::encryption::{encrypt_str, static_key_encryptor};
     use nss_as::ensure_initialized;
 
     #[test]
@@ -475,14 +475,13 @@ mod tests {
     fn test_scrub_undecryptable_credit_card_data_for_remote_replacement() {
         ensure_initialized();
         let store = Arc::new(Store::new_shared_memory("sync-mgr-test").expect("create store"));
-        let key = EncryptorDecryptor::create_key().expect("create key");
-        let encdec = EncryptorDecryptor::new(&key).expect("create EncryptorDecryptor");
+        let key = encryption::create_key().expect("create key");
+        let encdec = static_key_encryptor(&key).expect("create EncryptorDecryptor");
 
         store
             .add_credit_card(UpdatableCreditCardFields {
                 cc_name: "john deer".to_string(),
-                cc_number_enc: encdec
-                    .encrypt("567812345678123456781")
+                cc_number_enc: encrypt_str(&encdec, "567812345678123456781")
                     .expect("encrypt cc number"),
                 cc_number_last_4: "6781".to_string(),
                 cc_exp_month: 10,

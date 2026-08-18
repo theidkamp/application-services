@@ -30,7 +30,34 @@
 
 use crate::error::*;
 use error_support::handle_error;
-pub use jwcrypto::EncryptorDecryptor;
+use std::sync::Arc;
+
+pub use encryption::{EncryptorDecryptor, KeyManager, ManagedEncryptorDecryptor, StaticKeyManager};
+
+// TODO(FXCM-2281): the consumer will supply the encryptor when building the store.
+pub(crate) fn static_key_encryptor(key: &str) -> Result<ManagedEncryptorDecryptor> {
+    // Validate eagerly so an invalid key isn't treated as undecryptable card data.
+    jwcrypto::EncryptorDecryptor::new(key)?;
+
+    Ok(ManagedEncryptorDecryptor::new(Arc::new(
+        StaticKeyManager::new(key.to_string()),
+    )))
+}
+
+#[cfg(test)]
+pub(crate) fn random_key_encryptor() -> Result<ManagedEncryptorDecryptor> {
+    static_key_encryptor(&encryption::create_key()?)
+}
+
+pub(crate) fn encrypt_str(encdec: &dyn EncryptorDecryptor, cleartext: &str) -> Result<String> {
+    let ciphertext = encdec.encrypt(cleartext.as_bytes().to_vec())?;
+    String::from_utf8(ciphertext).map_err(|e| Error::CryptoNotUtf8(format!("encrypting: {e}")))
+}
+
+pub(crate) fn decrypt_str(encdec: &dyn EncryptorDecryptor, ciphertext: &str) -> Result<String> {
+    let cleartext = encdec.decrypt(ciphertext.as_bytes().to_vec())?;
+    String::from_utf8(cleartext).map_err(|e| Error::CryptoNotUtf8(format!("decrypting: {e}")))
+}
 
 // public functions we expose over the FFI (which is why they take `String`
 // rather than the `&str` you'd otherwise expect)
@@ -38,19 +65,19 @@ pub use jwcrypto::EncryptorDecryptor;
 pub fn encrypt_string(key: String, cleartext: String) -> ApiResult<String> {
     // It would be nice to have more detailed error messages, but that would require the consumer
     // to pass them in.  Let's not change the API yet.
-    Ok(EncryptorDecryptor::new(&key)?.encrypt(&cleartext)?)
+    encrypt_str(&static_key_encryptor(&key)?, &cleartext)
 }
 
 #[handle_error(Error)]
 pub fn decrypt_string(key: String, ciphertext: String) -> ApiResult<String> {
     // It would be nice to have more detailed error messages, but that would require the consumer
     // to pass them in.  Let's not change the API yet.
-    Ok(EncryptorDecryptor::new(&key)?.decrypt(&ciphertext)?)
+    decrypt_str(&static_key_encryptor(&key)?, &ciphertext)
 }
 
 #[handle_error(Error)]
 pub fn create_autofill_key() -> ApiResult<String> {
-    Ok(EncryptorDecryptor::create_key()?)
+    Ok(encryption::create_key()?)
 }
 
 #[cfg(test)]
@@ -61,28 +88,44 @@ mod test {
     #[test]
     fn test_encrypt() {
         ensure_initialized();
-        let ed = EncryptorDecryptor::new(&create_autofill_key().unwrap()).unwrap();
+        let ed = static_key_encryptor(&create_autofill_key().unwrap()).unwrap();
         let cleartext = "secret";
-        let ciphertext = ed.encrypt(cleartext).unwrap();
-        assert_eq!(ed.decrypt(&ciphertext).unwrap(), cleartext);
-        let ed2 = EncryptorDecryptor::new(&create_autofill_key().unwrap()).unwrap();
+        let ciphertext = encrypt_str(&ed, cleartext).unwrap();
+        assert_eq!(decrypt_str(&ed, &ciphertext).unwrap(), cleartext);
+        let ed2 = static_key_encryptor(&create_autofill_key().unwrap()).unwrap();
         assert!(matches!(
-            ed2.decrypt(&ciphertext).map_err(Error::from),
-            Err(Error::CryptoError(_))
+            decrypt_str(&ed2, &ciphertext),
+            Err(Error::EncryptionError(
+                encryption::EncryptionApiError::DecryptionFailed { .. }
+            ))
         ));
     }
 
     #[test]
     fn test_decryption_errors() {
+        // The shared crate maps all jwcrypto decryption failures to DecryptionFailed.
         ensure_initialized();
-        let ed = EncryptorDecryptor::new(&create_autofill_key().unwrap()).unwrap();
+        let ed = static_key_encryptor(&create_autofill_key().unwrap()).unwrap();
         assert!(matches!(
-            ed.decrypt("invalid-ciphertext").map_err(Error::from),
-            Err(Error::CryptoError(_)),
+            decrypt_str(&ed, "invalid-ciphertext"),
+            Err(Error::EncryptionError(
+                encryption::EncryptionApiError::DecryptionFailed { .. }
+            )),
         ));
         assert!(matches!(
-            ed.decrypt("").unwrap_err(),
-            jwcrypto::JwCryptoError::EmptyCyphertext,
+            decrypt_str(&ed, ""),
+            Err(Error::EncryptionError(
+                encryption::EncryptionApiError::DecryptionFailed { .. }
+            )),
         ));
+    }
+
+    #[test]
+    fn test_trait_roundtrip_is_byte_oriented() {
+        ensure_initialized();
+        let ed = random_key_encryptor().unwrap();
+        let ciphertext = ed.encrypt(b"secret".to_vec()).unwrap();
+        assert_ne!(ciphertext, b"secret".to_vec());
+        assert_eq!(ed.decrypt(ciphertext).unwrap(), b"secret".to_vec());
     }
 }

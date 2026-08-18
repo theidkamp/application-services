@@ -265,9 +265,9 @@ mod tests {
     use crate::db::credit_cards::tests::{
         get_all, insert_tombstone_record, test_insert_mirror_record,
     };
-    use crate::db::models::credit_card::InternalCreditCard;
+    use crate::db::models::credit_card::{InternalCreditCard, SecureCreditCardFields};
     use crate::db::schema::create_empty_sync_temp_tables;
-    use crate::encryption::EncryptorDecryptor;
+    use crate::encryption::{random_key_encryptor, EncryptorDecryptor};
     use crate::sync::{IncomingBso, UnknownFields};
     use nss_as::ensure_initialized;
     use sql_support::ConnExt;
@@ -275,7 +275,7 @@ mod tests {
     impl InternalCreditCard {
         pub fn into_test_incoming_bso(
             self,
-            encdec: &EncryptorDecryptor,
+            encdec: &dyn EncryptorDecryptor,
             unknown_fields: UnknownFields,
         ) -> IncomingBso {
             let mut payload = self.into_payload(encdec).expect("is json");
@@ -366,12 +366,15 @@ mod tests {
     fn test_engine_sync_reset() -> Result<()> {
         ensure_initialized();
         let engine = create_engine();
-        let encdec = EncryptorDecryptor::new_with_random_key().unwrap();
+        let encdec = random_key_encryptor().unwrap();
 
         let cc = InternalCreditCard {
             guid: Guid::random(),
             cc_name: "Ms Jane Doe".to_string(),
-            cc_number_enc: encdec.encrypt("12341232412341234")?,
+            cc_number_enc: SecureCreditCardFields {
+                cc_number: "12341232412341234".to_string(),
+            }
+            .encrypt(&encdec, "test-guid")?,
             cc_number_last_4: "1234".to_string(),
             cc_exp_month: 12,
             cc_exp_year: 2021,

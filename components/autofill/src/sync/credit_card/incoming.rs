@@ -5,9 +5,9 @@
 
 use super::CreditCardPayload;
 use crate::db::credit_cards::{add_internal_credit_card, update_internal_credit_card};
-use crate::db::models::credit_card::InternalCreditCard;
+use crate::db::models::credit_card::{InternalCreditCard, SecureCreditCardFields};
 use crate::db::schema::CREDIT_CARD_COMMON_COLS;
-use crate::encryption::EncryptorDecryptor;
+use crate::encryption::{decrypt_str, encrypt_str, EncryptorDecryptor, ManagedEncryptorDecryptor};
 use crate::error::*;
 use crate::sync::common::*;
 use crate::sync::{
@@ -25,9 +25,9 @@ use sync_guid::Guid as SyncGuid;
 fn raw_payload_to_incoming(
     id: SyncGuid,
     raw: String,
-    encdec: &EncryptorDecryptor,
+    encdec: &dyn EncryptorDecryptor,
 ) -> Result<IncomingContent<InternalCreditCard>> {
-    let payload = encdec.decrypt(&raw)?;
+    let payload = decrypt_str(encdec, &raw)?;
     // Turn it into a BSO
     let bso = IncomingBso {
         envelope: IncomingEnvelope {
@@ -58,7 +58,7 @@ fn raw_payload_to_incoming(
 }
 
 pub(super) struct IncomingCreditCardsImpl {
-    pub(super) encdec: EncryptorDecryptor,
+    pub(super) encdec: ManagedEncryptorDecryptor,
 }
 
 impl ProcessIncomingRecordImpl for IncomingCreditCardsImpl {
@@ -76,7 +76,7 @@ impl ProcessIncomingRecordImpl for IncomingCreditCardsImpl {
             .into_iter()
             .map(|bso| {
                 // consider turning this into malformed?
-                let encrypted = self.encdec.encrypt(&bso.payload)?;
+                let encrypted = encrypt_str(&self.encdec, &bso.payload)?;
                 Ok((bso.envelope.id, encrypted, bso.envelope.modified))
             })
             .collect::<Result<_>>()?;
@@ -208,9 +208,21 @@ impl ProcessIncomingRecordImpl for IncomingCreditCardsImpl {
             Ok(Self::Record::from_row(row)?)
         })?;
 
-        let incoming_cc_number = self.encdec.decrypt(&incoming.cc_number_enc)?;
+        let incoming_cc_number = SecureCreditCardFields::decrypt(
+            &incoming.cc_number_enc,
+            &self.encdec,
+            incoming.guid.as_str(),
+        )?
+        .cc_number;
         for record in records {
-            if self.encdec.decrypt(&record.cc_number_enc)? == incoming_cc_number {
+            if SecureCreditCardFields::decrypt(
+                &record.cc_number_enc,
+                &self.encdec,
+                record.guid.as_str(),
+            )?
+            .cc_number
+                == incoming_cc_number
+            {
                 return Ok(Some(record));
             }
         }
@@ -264,6 +276,7 @@ mod tests {
     use super::super::super::test::new_syncable_mem_db;
     use super::*;
     use crate::db::credit_cards::get_credit_card;
+    use crate::encryption::random_key_encryptor;
     use crate::sync::common::tests::*;
 
     use error_support::{info, trace};
@@ -332,7 +345,7 @@ mod tests {
             .clone()
     }
 
-    fn test_record(guid_prefix: char, encdec: &EncryptorDecryptor) -> InternalCreditCard {
+    fn test_record(guid_prefix: char, encdec: &dyn EncryptorDecryptor) -> InternalCreditCard {
         let json = test_json_record(guid_prefix);
         let payload = serde_json::from_value(json).unwrap();
         InternalCreditCard::from_payload(payload, encdec).expect("should be valid")
@@ -385,7 +398,7 @@ mod tests {
         for tc in test_cases {
             info!("starting new testcase");
             let tx = db.transaction().unwrap();
-            let encdec = EncryptorDecryptor::new_with_random_key().unwrap();
+            let encdec = random_key_encryptor().unwrap();
 
             // Add required items to the mirrors.
             let mirror_sql = "INSERT OR REPLACE INTO credit_cards_mirror (guid, payload)
@@ -395,7 +408,7 @@ mod tests {
                     mirror_sql,
                     rusqlite::named_params! {
                         ":guid": payload["id"].as_str().unwrap(),
-                        ":payload": encdec.encrypt(&payload.to_string())?,
+                        ":payload": encrypt_str(&encdec, &payload.to_string())?,
                     },
                 )
                 .expect("should insert mirror record");
@@ -441,7 +454,7 @@ mod tests {
         let mut db = new_syncable_mem_db();
         let tx = db.transaction()?;
         let ri = IncomingCreditCardsImpl {
-            encdec: EncryptorDecryptor::new_with_random_key().unwrap(),
+            encdec: random_key_encryptor().unwrap(),
         };
 
         ri.insert_local_record(&tx, test_record('C', &ri.encdec))?;
@@ -463,7 +476,7 @@ mod tests {
         let mut db = new_syncable_mem_db();
         let tx = db.transaction().expect("should get tx");
         let ci = IncomingCreditCardsImpl {
-            encdec: EncryptorDecryptor::new_with_random_key().unwrap(),
+            encdec: random_key_encryptor().unwrap(),
         };
         let record = test_record('C', &ci.encdec);
         let bso = record
@@ -478,7 +491,7 @@ mod tests {
         let mut db = new_syncable_mem_db();
         let tx = db.transaction().expect("should get tx");
         let ci = IncomingCreditCardsImpl {
-            encdec: EncryptorDecryptor::new_with_random_key().unwrap(),
+            encdec: random_key_encryptor().unwrap(),
         };
         do_test_incoming_tombstone(&ci, &tx, test_record('C', &ci.encdec));
     }
@@ -489,13 +502,13 @@ mod tests {
         let mut db = new_syncable_mem_db();
         let tx = db.transaction().expect("should get tx");
         let ci = IncomingCreditCardsImpl {
-            encdec: EncryptorDecryptor::new_with_random_key().unwrap(),
+            encdec: random_key_encryptor().unwrap(),
         };
         let mut scrubbed_record = test_record('A', &ci.encdec);
         let bso = scrubbed_record
             .clone()
             .into_test_incoming_bso(&ci.encdec, Default::default());
-        scrubbed_record.cc_number_enc = "".to_string();
+        scrubbed_record.cc_number_enc = String::new();
         do_test_scrubbed_local_data(&ci, &tx, scrubbed_record, bso);
     }
 
@@ -505,7 +518,7 @@ mod tests {
         let mut db = new_syncable_mem_db();
         let tx = db.transaction().expect("should get tx");
         let ci = IncomingCreditCardsImpl {
-            encdec: EncryptorDecryptor::new_with_random_key().unwrap(),
+            encdec: random_key_encryptor().unwrap(),
         };
         let record = test_record('C', &ci.encdec);
         let bso = record
@@ -519,7 +532,7 @@ mod tests {
         ensure_initialized();
         let mut db = new_syncable_mem_db();
         let tx = db.transaction().expect("should get tx");
-        let encdec = EncryptorDecryptor::new_with_random_key().unwrap();
+        let encdec = random_key_encryptor().unwrap();
         let ci = IncomingCreditCardsImpl { encdec };
         let local_record = test_record('C', &ci.encdec);
         let local_guid = local_record.guid.clone();
@@ -555,7 +568,7 @@ mod tests {
         ensure_initialized();
         let mut db = new_syncable_mem_db();
         let tx = db.transaction().expect("should get tx");
-        let encdec = EncryptorDecryptor::new_with_random_key().unwrap();
+        let encdec = random_key_encryptor().unwrap();
         let ci = IncomingCreditCardsImpl { encdec };
         let local_record = test_record('C', &ci.encdec);
         let local_guid = local_record.guid.clone();

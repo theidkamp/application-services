@@ -5,14 +5,14 @@
 
 use crate::db::{
     models::{
-        credit_card::{InternalCreditCard, UpdatableCreditCardFields},
+        credit_card::{InternalCreditCard, SecureCreditCardFields, UpdatableCreditCardFields},
         Metadata,
     },
     schema::{CREDIT_CARD_COMMON_COLS, CREDIT_CARD_COMMON_VALS},
 };
 use crate::error::*;
 
-use jwcrypto::EncryptorDecryptor;
+use crate::encryption::static_key_encryptor;
 use rusqlite::{Connection, Transaction};
 use sync_guid::Guid;
 use types::Timestamp;
@@ -231,11 +231,19 @@ pub fn scrub_undecryptable_credit_card_data_for_remote_replacement(
 ) -> Result<CreditCardsDeletionMetrics> {
     let tx = conn.unchecked_transaction()?;
     let mut scrubbed_records = 0;
-    let encdec = EncryptorDecryptor::new(local_encryption_key.as_str()).unwrap();
+    // TODO(FXCM-2281): revisit - this takes a key, but the store will own the encryptor.
+    let encdec = static_key_encryptor(local_encryption_key.as_str()).unwrap();
 
     let undecryptable_record_ids = get_all_credit_cards(conn)?
         .into_iter()
-        .filter(|credit_card| encdec.decrypt(&credit_card.cc_number_enc).is_err())
+        .filter(|credit_card| {
+            SecureCreditCardFields::decrypt(
+                &credit_card.cc_number_enc,
+                &encdec,
+                credit_card.guid.as_str(),
+            )
+            .is_err()
+        })
         .map(|credit_card| credit_card.guid)
         .collect::<Vec<_>>();
 
@@ -290,7 +298,7 @@ pub fn touch(conn: &Connection, guid: &Guid) -> Result<()> {
 pub(crate) mod tests {
     use super::*;
     use crate::db::test::new_mem_db;
-    use crate::encryption::EncryptorDecryptor;
+    use crate::encryption::{encrypt_str, random_key_encryptor, static_key_encryptor};
     use nss_as::ensure_initialized;
     use sync15::bso::IncomingBso;
 
@@ -588,13 +596,13 @@ pub(crate) mod tests {
     fn test_credit_card_delete() -> Result<()> {
         ensure_initialized();
         let db = new_mem_db();
-        let encdec = EncryptorDecryptor::new_with_random_key().unwrap();
+        let encdec = random_key_encryptor().unwrap();
 
         let saved_credit_card = add_credit_card(
             &db,
             UpdatableCreditCardFields {
                 cc_name: "john deer".to_string(),
-                cc_number_enc: encdec.encrypt("1234567812345678")?,
+                cc_number_enc: encrypt_str(&encdec, "1234567812345678")?,
                 cc_number_last_4: "5678".to_string(),
                 cc_exp_month: 10,
                 cc_exp_year: 2025,
@@ -610,7 +618,7 @@ pub(crate) mod tests {
             &db,
             UpdatableCreditCardFields {
                 cc_name: "john doe".to_string(),
-                cc_number_enc: encdec.encrypt("1234123412341234")?,
+                cc_number_enc: encrypt_str(&encdec, "1234123412341234")?,
                 cc_number_last_4: "1234".to_string(),
                 cc_exp_month: 5,
                 cc_exp_year: 2024,
@@ -656,14 +664,14 @@ pub(crate) mod tests {
     fn test_scrub_encrypted_credit_card_data() -> Result<()> {
         ensure_initialized();
         let db = new_mem_db();
-        let encdec = EncryptorDecryptor::new_with_random_key().unwrap();
+        let encdec = random_key_encryptor().unwrap();
         let mut saved_credit_cards = Vec::with_capacity(10);
         for _ in 0..5 {
             saved_credit_cards.push(add_credit_card(
                 &db,
                 UpdatableCreditCardFields {
                     cc_name: "john deer".to_string(),
-                    cc_number_enc: encdec.encrypt("1234567812345678")?,
+                    cc_number_enc: encrypt_str(&encdec, "1234567812345678")?,
                     cc_number_last_4: "5678".to_string(),
                     cc_exp_month: 10,
                     cc_exp_year: 2025,
@@ -685,16 +693,16 @@ pub(crate) mod tests {
     fn test_scrub_undecryptable_credit_card_date_for_remote_replacement() -> Result<()> {
         ensure_initialized();
         let db = new_mem_db();
-        let old_key = EncryptorDecryptor::create_key()?;
-        let old_encdec = EncryptorDecryptor::new(&old_key)?;
-        let key = EncryptorDecryptor::create_key()?;
-        let encdec = EncryptorDecryptor::new(&key)?;
+        let old_key = encryption::create_key()?;
+        let old_encdec = static_key_encryptor(&old_key)?;
+        let key = encryption::create_key()?;
+        let encdec = static_key_encryptor(&key)?;
 
         let undecryptable_credit_card = add_credit_card(
             &db,
             UpdatableCreditCardFields {
                 cc_name: "jane doe".to_string(),
-                cc_number_enc: old_encdec.encrypt("2345678923456789")?,
+                cc_number_enc: encrypt_str(&old_encdec, "2345678923456789")?,
                 cc_number_last_4: "6789".to_string(),
                 cc_exp_month: 9,
                 cc_exp_year: 2027,
@@ -702,7 +710,7 @@ pub(crate) mod tests {
             },
         )?;
 
-        let encrypted_cc_number = encdec.encrypt("567812345678123456781")?;
+        let encrypted_cc_number = encrypt_str(&encdec, "567812345678123456781")?;
         let credit_card = add_credit_card(
             &db,
             UpdatableCreditCardFields {
