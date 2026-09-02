@@ -1,6 +1,32 @@
-# v156.0 (In progress)
+# v157.0 (In progress)
 
 [Full Changelog](In progress)
+
+## ✨ What's Changed ✨
+
+### Autofill
+
+- `update_address()` now sets `time_last_modified` to the time of the update, matching `update_credit_card()` and `update_passport()`.
+
+### Ads-Client
+
+- Added `blocks: Vec<String>` to `ffi::MozAdsRequestOptions`, `AdsClient::request*_ads`, `MARSClient::fetch_ads`, `mars::AdRequest`, and `mars::AdRequest::try_new`. This is serialized and passed to MARS so that it can remove blocks server-side.
+
+# v156.0 (_2026-08-27_)
+
+## ✨ What's Changed ✨
+
+### Nimbus
+
+- A new API has been added to get the list of enrolled experiments and rollouts without instantiating a NimbusClient: `get_active_enrollments()`. ([#7560](https://github.com/mozilla/application-services/pull/7560))
+
+[Full Changelog](https://github.com/mozilla/application-services/compare/v155.0...v156.0)
+
+## ✨ What's Changed ✨
+
+### Logins
+
+- Add `LoginStore::list_candidates()` and `LoginStore::get_many()`, a pair of read APIs for consumers which filter logins on their unencrypted fields. `list_candidates()` returns a `LoginCandidate` per stored login - everything `Login` has except the secure fields (`username`/`password`), so searching by `origin`, `httpRealm` or `formActionOrigin` no longer forces a primary password prompt. `get_many()` then decrypts just the logins which matched. `list()` is unchanged, for callers who really do want every login in cleartext.
 
 # v155.0 (_2026-08-13_)
 
@@ -26,13 +52,17 @@
 - The `CheckAuthorizationStatus` and `Disconnect` events are now valid from all states except `Uninitialized`.
 In the cases where the failed before, they're now no-ops.
 
+### Logins
+
+- `NSSKeyManager` now caches the encryption key instead of fetching it from NSS on every `encrypt()`/`decrypt()` call. Bulk operations such as `add_many_with_meta()` previously paid at least two NSS token round-trips per record while holding the store mutex, which could stall `shutdown()` past the async shutdown timeout. The cache is dropped whenever the token is found locked again, so primary password re-authentication is unaffected. ([Bug 2062062](https://bugzilla.mozilla.org/show_bug.cgi?id=2062062))
+
 ### Nimbus
 
 - `NimbusClient::get_available_firefox_labs()` now includes detailed debug level logging for each processed lab. ([#7482](https://github.com/mozilla/application-services/pull/7482))
 
 ### Remote Settings
 - Replacing v1 routes with v2 routes, removing added v2 routes ([#7492](https://github.com/mozilla/application-services/pull/7339))
-- Verify signature of imported data when `.get()` is called with `sync_if_empty: true` ([#7518](https://github.com/mozilla/application-services/pull/7518)) 
+- Verify signature of imported data when `.get()` is called with `sync_if_empty: true` ([#7518](https://github.com/mozilla/application-services/pull/7518))
 - Do not quote `_since` values with the v2 API ([#7523](https://github.com/mozilla/application-services/pull/7523))
 
 ### Sync Manager

@@ -198,9 +198,10 @@ where
         flags: AdRequestFlags,
         options: Option<CachePolicy>,
         ohttp: bool,
+        blocks: Vec<String>,
     ) -> Result<HashMap<String, AdImage>, RequestAdsError> {
         let response = self
-            .request_ads::<AdImage>(ad_placement_requests, flags, options, ohttp)
+            .request_ads::<AdImage>(ad_placement_requests, flags, options, ohttp, blocks)
             .inspect_err(|e| {
                 self.telemetry.record(e);
             })?;
@@ -214,8 +215,10 @@ where
         flags: AdRequestFlags,
         options: Option<CachePolicy>,
         ohttp: bool,
+        blocks: Vec<String>,
     ) -> Result<HashMap<String, Vec<AdSpoc>>, RequestAdsError> {
-        let result = self.request_ads::<AdSpoc>(ad_placement_requests, flags, options, ohttp);
+        let result =
+            self.request_ads::<AdSpoc>(ad_placement_requests, flags, options, ohttp, blocks);
         result
             .inspect_err(|e| {
                 self.telemetry.record(e);
@@ -232,8 +235,10 @@ where
         flags: AdRequestFlags,
         options: Option<CachePolicy>,
         ohttp: bool,
+        blocks: Vec<String>,
     ) -> Result<HashMap<String, AdTile>, RequestAdsError> {
-        let result = self.request_ads::<AdTile>(ad_placement_requests, flags, options, ohttp);
+        let result =
+            self.request_ads::<AdTile>(ad_placement_requests, flags, options, ohttp, blocks);
         result
             .inspect_err(|e| {
                 self.telemetry.record(e);
@@ -250,15 +255,21 @@ where
         flags: AdRequestFlags,
         options: Option<CachePolicy>,
         ohttp: bool,
+        blocks: Vec<String>,
     ) -> Result<AdResponse<A>, RequestAdsError>
     where
         A: AdResponseValue,
     {
         let context_id = self.get_context_id()?;
         let cache_policy = options.unwrap_or_default();
-        let (mut response, request_hash) =
-            self.client
-                .fetch_ads::<A>(context_id, flags, placements, cache_policy, ohttp)?;
+        let (mut response, request_hash) = self.client.fetch_ads::<A>(
+            context_id,
+            flags,
+            placements,
+            cache_policy,
+            ohttp,
+            blocks,
+        )?;
         response.enrich_callbacks(&request_hash);
         Ok(response)
     }
@@ -336,6 +347,7 @@ mod tests {
             AdRequestFlags::default(),
             None,
             false,
+            Default::default(),
         );
         assert!(result.is_ok());
         m.assert();
@@ -360,6 +372,7 @@ mod tests {
             AdRequestFlags::default(),
             None,
             false,
+            Default::default(),
         );
         assert!(result.is_ok());
         m.assert();
@@ -384,6 +397,7 @@ mod tests {
             AdRequestFlags::default(),
             None,
             false,
+            Default::default(),
         );
         assert!(result.is_ok());
         m.assert();
@@ -425,6 +439,7 @@ mod tests {
             AdRequestFlags::default(),
             None,
             false,
+            Default::default(),
         );
         assert!(result.is_ok());
         m.assert();
@@ -486,6 +501,7 @@ mod tests {
                 AdRequestFlags::default(),
                 None,
                 false,
+                Default::default(),
             )
             .unwrap();
         let callback_url = response.values().next().unwrap().callbacks.click.clone();
@@ -500,6 +516,7 @@ mod tests {
                 AdRequestFlags::default(),
                 None,
                 false,
+                Default::default(),
             )
             .unwrap();
 
@@ -511,6 +528,7 @@ mod tests {
                 AdRequestFlags::default(),
                 Some(CachePolicy::default()),
                 false,
+                Default::default(),
             )
             .unwrap();
 
@@ -557,6 +575,32 @@ mod tests {
 
         // weak ref will show 0 strong references when the Arc<dyn MozAdsTelemetry> is gone.
         assert_ne!(weak_reference.strong_count(), 0);
+        client.shutdown_client().unwrap();
+        assert_eq!(weak_reference.strong_count(), 0);
+    }
+
+    #[test]
+    fn test_shutdown_is_idempotent() {
+        viaduct_dev::init_backend_dev();
+
+        let noop_telemetry = MozAdsTelemetryWrapper::noop();
+        let weak_reference = Arc::downgrade(
+            &noop_telemetry
+                .clone_inner_arc()
+                .expect("Inner telemetry should be Some before dropping"),
+        );
+        // A real cache so the second shutdown exercises the db close path.
+        let cache = HttpCache::builder("test_shutdown_is_idempotent")
+            .build()
+            .unwrap();
+        let mars_client = MARSClient::new(Environment::Test, Some(cache), noop_telemetry);
+        let mut client = new_with_mars_client(mars_client);
+
+        client.shutdown_client().unwrap();
+        assert_eq!(weak_reference.strong_count(), 0);
+
+        // Repeated shutdowns must not error or re-close an already closed connection.
+        client.shutdown_client().unwrap();
         client.shutdown_client().unwrap();
         assert_eq!(weak_reference.strong_count(), 0);
     }
