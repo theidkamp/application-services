@@ -89,6 +89,10 @@ pub(crate) fn static_key_encryptor(key: &str) -> Result<ManagedEncryptorDecrypto
 
 // public functions we expose over the FFI (which is why they take `String`
 // rather than the `&str` you'd otherwise expect)
+//
+// TODO(FXCM-2282): superseded by `Store::encrypt_string` /
+// `Store::decrypt_string`; remove once Android and iOS no longer hold an
+// encryption key of their own.
 #[handle_error(Error)]
 pub fn encrypt_string(key: String, cleartext: String) -> ApiResult<String> {
     // It would be nice to have more detailed error messages, but that would require the consumer

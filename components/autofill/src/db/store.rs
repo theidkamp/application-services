@@ -8,7 +8,7 @@ use crate::db::models::address::{
 };
 use crate::db::models::credit_card::{
     CreditCard, CreditCardBulkResultEntry, CreditCardBulkTombstoneResultEntry, CreditCardTombstone,
-    UpdatableCreditCardFields, UpdatableCreditCardFieldsWithMeta,
+    SecureCreditCardFields, UpdatableCreditCardFields, UpdatableCreditCardFieldsWithMeta,
 };
 use crate::db::models::passport::{Passport, UpdatablePassportFields};
 use crate::db::{
@@ -95,6 +95,25 @@ impl Store {
     pub fn add_credit_card(&self, fields: UpdatableCreditCardFields) -> ApiResult<CreditCard> {
         let credit_card = credit_cards::add_credit_card(&self.lock_db()?.writer, fields)?;
         Ok(credit_card.into())
+    }
+
+    #[handle_error(Error)]
+    pub fn encrypt_string(&self, cleartext: String) -> ApiResult<String> {
+        let db = self.lock_db()?;
+        SecureCreditCardFields {
+            cc_number: cleartext,
+            ..Default::default()
+        }
+        .encrypt(db.encdec.as_ref(), "<no guid>")
+    }
+
+    #[handle_error(Error)]
+    pub fn decrypt_string(&self, ciphertext: String) -> ApiResult<String> {
+        let db = self.lock_db()?;
+        Ok(
+            SecureCreditCardFields::decrypt(&ciphertext, db.encdec.as_ref(), "<no guid>")?
+                .cc_number,
+        )
     }
 
     /// Adds a credit card **including metadata**. Normally the metadata (guid,
@@ -529,6 +548,63 @@ mod tests {
         db.writer.execute("DELETE FROM moz_meta", [])?;
 
         Ok(())
+    }
+
+    #[test]
+    fn test_the_key_api_and_the_store_read_each_other() {
+        nss_as::ensure_initialized();
+        let key = crate::create_autofill_key().unwrap();
+        let store = Store::new_shared_memory(
+            "string-crypto-cross",
+            Arc::new(crate::static_key_encryptor(&key).unwrap()),
+        )
+        .unwrap();
+
+        // Encrypted the old way (consumer holds the key)...
+        let old_style = crate::encrypt_string(key.clone(), "4111111111117629".to_string()).unwrap();
+        // ...reads back through the store, and vice versa.
+        assert_eq!(store.decrypt_string(old_style).unwrap(), "4111111111117629");
+        let new_style = store
+            .encrypt_string("5500005555555559".to_string())
+            .unwrap();
+        assert_eq!(
+            crate::decrypt_string(key, new_style).unwrap(),
+            "5500005555555559"
+        );
+    }
+
+    #[test]
+    fn test_store_owned_string_crypto() {
+        let store = Store::new_shared_memory("store-crypto", test_encdec()).unwrap();
+
+        // Roundtrip through the store's own key.
+        let ciphertext = store
+            .encrypt_string("4111111111117629".to_string())
+            .unwrap();
+        assert_ne!(ciphertext, "4111111111117629");
+        assert_eq!(
+            store.decrypt_string(ciphertext.clone()).unwrap(),
+            "4111111111117629"
+        );
+
+        // The Desktop adapter's path: encrypt via the store, hand the
+        // ciphertext into the record API, read it back decrypted.
+        let cc = store
+            .add_credit_card(UpdatableCreditCardFields {
+                cc_name: "jane doe".to_string(),
+                cc_number_enc: ciphertext,
+                cc_number_last_4: "7629".to_string(),
+                cc_exp_month: 9,
+                cc_exp_year: 2027,
+                cc_type: "visa".to_string(),
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .decrypt_string(store.get_credit_card(cc.guid).unwrap().cc_number_enc)
+                .unwrap(),
+            "4111111111117629"
+        );
     }
 
     #[test]
